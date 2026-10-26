@@ -1,0 +1,254 @@
+# Regional B2B Procurement Platform for MSMEs (ProcureFlow)
+## Simplified Implementation Plan & Engineering Specification
+
+---
+
+### 1. Executive Summary & Core Value Proposition
+
+**ProcureFlow** is a streamlined B2B procurement platform tailored for Micro, Small, and Medium Enterprises (MSMEs). Rather than serving as an open-ended supplier directory or lead-generation board, it digitizes and governs the end-to-end purchasing workflow:
+
+$$\text{Draft RFQ} \longrightarrow \text{Regional Bidding} \longrightarrow \text{Slab Pricing} \longrightarrow \text{Vendor Selection} \longrightarrow \text{Financial Approval} \longrightarrow \text{Purchase Order (PO)}$$
+
+#### Why This Is Beyond a Basic CRUD App
+* **Deterministic Workflow State Machine:** Strict transitions govern the RFQ lifecycle. Bypassing steps (e.g., drafting straight to PO) is rejected by backend business logic.
+* **Tiered / Slab Pricing Engine:** Vendors submit quantity-based pricing slabs. The system dynamically resolves the unit price and calculates total spend for requested quantities.
+* **Role-Based Financial Governance:** Conditional workflow branching requires Manager/Finance approval when order values exceed a configurable threshold (e.g., ₹50,000 / $5,000).
+* **Immutable PO & Audit Trail:** Every status change, quote submission, and approval decision is logged chronologically for compliance and accountability.
+* **Regional Matching:** Filters RFQs by buyer/vendor geographic proximity (city/state) to optimize for local delivery times and transit costs.
+
+---
+
+### 2. Scope Definition: MVP vs. Out-of-Scope
+
+| Category | In-Scope (MVP — 2 to 4 Weeks) | Out-of-Scope (Deferred to Post-MVP) |
+|---|---|---|
+| **Architecture** | Clean Modular Monolith, Single Database | Dual-database (Mongo + Postgres hybrid), Microservices |
+| **Authentication** | JWT Authentication with RBAC (Buyer, Vendor, Finance) | SSO, OAuth2 / Social logins, Multi-factor auth |
+| **Procurement** | Single-item bulk RFQs with quantity, specs, deadline | Complex multi-item BOMs (Bill of Materials) |
+| **Pricing** | Multi-tier quantity slab engine with automated totals | Live reverse-auction timer, dynamic bidding wars |
+| **Location** | Region/City matching & proximity filtering | Real-time GIS routing, GPS tracking, map overlays |
+| **Financials** | Single-level threshold approval (exceeds limit $\rightarrow$ Finance) | Multi-tier hierarchical approval matrices |
+| **Outputs** | Immutable PO record + printable web view | Complex PDF canvas rendering, EDI integration |
+| **Communications** | In-app notification flags & audit logs | Real-time WebSocket chat, SMS / WhatsApp bots |
+| **Payments** | Workflow terminates at verified PO generation | Escrow, payment gateway integrations, invoice financing |
+
+---
+
+### 3. Pragmatic Tech Stack & Architecture
+
+A modular monolith keeping cognitive load low for a solo developer while maintaining clean separation of concerns.
+
+* **Backend:** Node.js + Express (ES Modules)
+* **Database:** MongoDB with Mongoose *(Single database with strict schema validation; eliminates dual-DB overhead)*
+  *(Alternative: PostgreSQL with Prisma if relational DB preferred)*
+* **Validation:** Zod (request payload & boundary validation)
+* **Authentication:** JWT (JSON Web Tokens) with hashed passwords (`bcryptjs`)
+* **Frontend:** React 19 + TypeScript + Vite + Tailwind CSS v4
+* **Testing:** Vitest / Jest + Supertest (unit & integration testing)
+
+```
+backend/src/
+├── config/             # DB connection, env variables, constants
+├── middleware/         # Auth (JWT/RBAC), validation, error handler
+├── modules/
+│   ├── auth/           # Login, registration, token verification
+│   ├── rfqs/           # RFQ lifecycle & FSM state machine
+│   ├── quotations/     # Quotes, tiered pricing engine, selection
+│   ├── approvals/      # Financial threshold verification & approvals
+│   ├── orders/         # Purchase order generation
+│   └── audit/          # Chronological event logger
+├── server.js           # Express app bootstrap & routing
+```
+
+---
+
+### 4. Core Business Engines & Logic
+
+#### Engine A: Deterministic RFQ State Machine
+The backend strictly enforces the following transition graph:
+
+```
+[ DRAFT ] ────────► [ OPEN / PUBLISHED ] ────────► [ UNDER_REVIEW ]
+                          │                              │
+                          ▼ (Deadline passes/cancelled)  ▼
+                     [ CANCELLED ]                 [ VENDOR_SELECTED ]
+                                                         │
+                                        ┌────────────────┴────────────────┐
+                           (Total <= Threshold)              (Total > Threshold)
+                                        │                                 │
+                                        ▼                                 ▼
+                                   [ APPROVED ]               [ PENDING_APPROVAL ]
+                                        │                             │     │
+                                        │                    Approved │     │ Rejected
+                                        │                             │     ▼
+                                        │                             └──► [ REJECTED ]
+                                        ▼
+                                  [ PO_ISSUED ]
+```
+
+*Transitions attempted out of order return `422 Unprocessable Entity`.*
+
+#### Engine B: Tiered / Slab Pricing Engine
+Vendors submit quantity tiers with price per unit. Given RFQ requested quantity $Q$:
+1. Find tier where: $\text{min\_qty} \le Q \le \text{max\_qty}$ (or $\text{min\_qty} \le Q$ with open upper bound).
+2. Calculate total: $\text{Total} = Q \times \text{slab.unit\_price}$.
+3. Validation rules:
+   * Slabs must not overlap.
+   * Higher quantity slabs must have lower or equal unit prices ($\text{unit\_price}_{n+1} \le \text{unit\_price}_n$).
+   * If requested quantity falls outside all slabs, quote submission is rejected with actionable error.
+
+#### Engine C: Financial Approval Threshold
+* Default Organization Policy: Threshold $T = \text{₹}50,000$.
+* If selected quote total $\le T$: Auto-approved $\rightarrow$ transitions directly to `APPROVED`.
+* If selected quote total $> T$: State transitions to `PENDING_APPROVAL`. Only users with `FINANCE` or `ADMIN` role can execute `approve` or `reject` actions with mandatory remarks.
+
+#### Engine D: Immutable Purchase Order & Audit Trail
+* Once state is `APPROVED`, system generates a unique PO (`PO-YYYYMMDD-XXXX`).
+* The PO freezes vendor details, buyer details, agreed pricing slabs, and delivery terms.
+* Audit log records: `entity_type`, `entity_id`, `action`, `from_state`, `to_state`, `user_id`, `timestamp`.
+
+---
+
+### 5. Data Model & Schema Design
+
+#### 1. Users & Organizations (`users`)
+* `_id`: ObjectId
+* `name`: String
+* `email`: String (unique, indexed)
+* `password`: String (bcrypt hash)
+* `role`: Enum [`BUYER`, `VENDOR`, `FINANCE`]
+* `organization`: String
+* `region`: String (e.g., "Chennai", "Coimbatore", "Bangalore")
+
+#### 2. RFQs (`rfqs`)
+* `_id`: ObjectId
+* `rfq_number`: String (e.g., "RFQ-2026-001")
+* `buyer_id`: Ref -> `User`
+* `title`: String
+* `description`: String
+* `category`: String (e.g., "Machining", "Electrical", "Raw Materials")
+* `quantity`: Number (positive integer)
+* `unit`: String (e.g., "pcs", "kg", "meters")
+* `region`: String (geographical filter target)
+* `deadline`: Date
+* `status`: Enum [`DRAFT`, `OPEN`, `UNDER_REVIEW`, `PENDING_APPROVAL`, `APPROVED`, `REJECTED`, `PO_ISSUED`, `CANCELLED`]
+* `selected_quotation_id`: Ref -> `Quotation` (nullable)
+
+#### 3. Quotations (`quotations`)
+* `_id`: ObjectId
+* `rfq_id`: Ref -> `RFQ`
+* `vendor_id`: Ref -> `User`
+* `slabs`: Array of `{ min_qty: Number, max_qty: Number | null, unit_price: Number }`
+* `evaluated_unit_price`: Number (dynamically calculated for RFQ quantity)
+* `evaluated_total_price`: Number ($Q \times \text{evaluated\_unit\_price}$)
+* `lead_time_days`: Number
+* `validity_date`: Date
+* `notes`: String
+* `status`: Enum [`SUBMITTED`, `ACCEPTED`, `REJECTED`]
+
+#### 4. Purchase Orders (`purchase_orders`)
+* `_id`: ObjectId
+* `po_number`: String (unique)
+* `rfq_id`: Ref -> `RFQ`
+* `quotation_id`: Ref -> `Quotation`
+* `buyer_id`: Ref -> `User`
+* `vendor_id`: Ref -> `User`
+* `total_amount`: Number
+* `delivery_deadline`: Date
+* `status`: Enum [`ISSUED`, `ACKNOWLEDGED`, `FULFILLED`]
+* `created_at`: Date
+
+#### 5. Audit Logs (`audit_logs`)
+* `_id`: ObjectId
+* `entity_type`: Enum [`RFQ`, `QUOTATION`, `ORDER`]
+* `entity_id`: ObjectId
+* `action`: String (e.g., `PUBLISH`, `SUBMIT_QUOTE`, `SELECT_VENDOR`, `FINANCE_APPROVE`)
+* `from_state`: String
+* `to_state`: String
+* `performed_by`: Ref -> `User`
+* `notes`: String
+* `created_at`: Date
+
+---
+
+### 6. REST API Specification
+
+| Method | Endpoint | Allowed Roles | Description |
+|---|---|---|---|
+| `POST` | `/api/auth/register` | Public | Register new user with designated role & region |
+| `POST` | `/api/auth/login` | Public | Authenticate user & return JWT token |
+| `GET` | `/api/auth/me` | Authenticated | Fetch current profile and permissions |
+| `GET` | `/api/rfqs` | Authenticated | List RFQs (Buyers see own; Vendors see regional `OPEN` RFQs) |
+| `POST` | `/api/rfqs` | `BUYER` | Create new RFQ in `DRAFT` |
+| `PATCH`| `/api/rfqs/:id/publish`| `BUYER` | Publish RFQ (`DRAFT` $\rightarrow$ `OPEN`) |
+| `GET` | `/api/rfqs/:id` | Authenticated | Get RFQ details and state |
+| `POST` | `/api/rfqs/:id/quotes` | `VENDOR` | Submit quote with pricing slabs |
+| `GET` | `/api/rfqs/:id/quotes` | `BUYER`, `FINANCE` | View and compare all submitted quotations |
+| `POST` | `/api/rfqs/:id/select` | `BUYER` | Select winning quote (Evaluates threshold $\rightarrow$ `APPROVED` or `PENDING_APPROVAL`) |
+| `POST` | `/api/rfqs/:id/approve`| `FINANCE` | Approve pending high-value procurement |
+| `POST` | `/api/rfqs/:id/reject` | `FINANCE` | Reject pending procurement with remarks |
+| `POST` | `/api/rfqs/:id/generate-po`| `BUYER`, `FINANCE`| Generate immutable PO from `APPROVED` state |
+| `GET` | `/api/orders/:id` | `BUYER`, `VENDOR`, `FINANCE`| View generated Purchase Order details |
+| `GET` | `/api/rfqs/:id/audit` | Authenticated | Retrieve complete chronological audit trail |
+
+---
+
+### 7. Frontend User Journeys
+
+* **Buyer Workspace:**
+  1. Create RFQ form with validation (quantity, unit, deadline, specs, region).
+  2. RFQ Dashboard displaying statuses with badge indicators.
+  3. Quotation Comparison Matrix: Side-by-side view comparing vendors on unit price, total price, and lead time with best-offer highlights.
+  4. One-click vendor selection triggering state transition.
+* **Vendor Workspace:**
+  1. Regional Feed: Displays open RFQs in vendor's local region/category.
+  2. Dynamic Quotation Builder: Interactive UI to add/remove quantity slabs with live price preview calculation.
+  3. Quotation tracker showing accepted/rejected/pending status.
+* **Finance / Approver Workspace:**
+  1. Queue of requests in `PENDING_APPROVAL` with value breakdown vs threshold.
+  2. Quick comparison modal showing selected vendor vs alternatives.
+  3. Approve/Reject action bar with required remarks input.
+* **Purchase Order View:**
+  * Clean, formatted, printable PO document ready for official records.
+
+---
+
+### 8. Engineering Quality & Testing Strategy
+
+* **Input Validation:** Strict Zod schemas validating request payloads (preventing negative quantities, inverted slab ranges, past deadlines).
+* **Robust Error Handling:** Centralized Express error handler returning structured JSON errors `{ error: { code, message, details } }`.
+* **Automated Testing Suite (Vitest + Supertest):**
+  1. *Pricing Engine Unit Tests:*
+     * Valid slab matching for lower, middle, and upper quantities.
+     * Rejection of overlapping or disordered slabs.
+     * Edge case: Quantity below minimum slab threshold.
+  2. *FSM & Workflow Integration Tests:*
+     * Prevent illegal transition: Direct `DRAFT` $\rightarrow$ `PO_ISSUED` must fail with `422`.
+     * Non-vendor attempting to submit quote must fail with `403`.
+     * Buyer selecting quote $> \text{₹}50,000$ transitions to `PENDING_APPROVAL`, NOT `APPROVED`.
+     * Unauthorized user attempting finance approval must fail with `403`.
+     * Valid end-to-end happy path verifies PO generation and audit log entries.
+
+---
+
+### 9. Actionable 3–4 Week Implementation Roadmap
+
+#### Week 1: Foundation, Auth & State-Driven RFQ Core
+* **Days 1–2:** Clean backend structure (single DB setup with Mongoose, config, error middleware).
+* **Days 3–4:** User authentication module (JWT, bcrypt, RBAC middleware). Seed test accounts for Buyer, Vendor, Finance.
+* **Days 5–7:** RFQ module with strict FSM lifecycle validation and CRUD APIs (`DRAFT`, `OPEN`, `CANCELLED`).
+
+#### Week 2: Tiered Pricing Engine, Quotation & Approval Logic
+* **Days 8–10:** Quotations module with Pricing Slab calculation engine & unit tests.
+* **Days 11–12:** Vendor Selection logic and Financial Approval threshold rules.
+* **Days 13–14:** Purchase Order generation module and Audit Logging middleware. Full API integration test suite.
+
+#### Week 3: Frontend Client Dashboards
+* **Days 15–17:** Shared layout, authentication state, Buyer RFQ creation & management dashboard.
+* **Days 18–19:** Vendor Feed & Dynamic Quotation Builder with slab calculators.
+* **Days 20–21:** Quotation Comparison Matrix & Finance Approval view.
+
+#### Week 4: Polish, Testing & Demonstration Readiness
+* **Days 22–24:** PO printable view, audit timeline component, end-to-end integration polish.
+* **Days 25–26:** Comprehensive end-to-end testing, seed data script (realistic MSME scenarios).
+* **Days 27–28:** README documentation, API docs, and project presentation walkthrough.

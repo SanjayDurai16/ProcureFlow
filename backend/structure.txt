@@ -1,0 +1,52 @@
+backend/
+├── src/
+│   ├── config/
+│   │   ├── env.js
+│   │   ├── db.js
+│   │   └── logger.js
+│   │
+│   ├── middleware/
+│   │   ├── auth.middleware.js
+│   │   ├── error.middleware.js
+│   │   └── validate.middleware.js
+│   │
+│   ├── modules/
+│   │   ├── auth/
+│   │   │   ├── auth.controller.js
+│   │   │   ├── auth.routes.js
+│   │   │   ├── auth.service.js
+│   │   │   └── user.model.js
+│   │   ├── rfqs/
+│   │   │   ├── rfq.controller.js
+│   │   │   ├── rfq.routes.js
+│   │   │   ├── rfq.service.js
+│   │   │   ├── rfq.state-machine.js
+│   │   │   └── rfq.model.js
+│   │   ├── quotations/
+│   │   │   ├── quotation.controller.js
+│   │   │   ├── quotation.routes.js
+│   │   │   ├── quotation.service.js
+│   │   │   ├── pricing-engine.js
+│   │   │   └── quotation.model.js
+│   │   ├── orders/
+│   │   │   ├── order.controller.js
+│   │   │   ├── order.routes.js
+│   │   │   ├── order.service.js
+│   │   │   └── order.model.js
+│   │   └── audit/
+│   │       ├── audit.service.js
+│   │       └── audit.model.js
+│   │
+│   ├── app.js
+│   └── server.js
+│
+├── tests/
+│   ├── unit/
+│   │   ├── pricing-engine.test.js
+│   │   └── state-machine.test.js
+│   └── integration/
+│       ├── auth.test.js
+│       └── rfq-workflow.test.js
+│
+├── package.json
+└── README.md
